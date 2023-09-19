@@ -1,0 +1,307 @@
+---
+title: "Multilevel Modeling Learning"
+date: '`r format(Sys.Date(), "%Y-%m-%d")`'
+output:
+  html_document:
+    code_folding: hide
+    theme: flat
+    toc: yes
+    toc_depth: 5
+    toc_float:
+      collapsed: no
+  pdf_document:
+    toc: yes
+    toc_depth: '5'
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(lme4)
+
+library(remotes) # installation from remote rep
+
+remotes::install_github("easystats/easystats")
+library(easystats)
+
+remotes::install_github("datalorax/equatiomatic")
+library(equatiomatic) # convert model to equations
+
+install.packages("magrittr")
+
+```
+
+```{r}
+# mean math scores by school
+sch_means <- hsb |> 
+  group_by(sch.id) |> 
+  summarize(sch_mean = mean(math, na.rm = TRUE),
+            sch_mean_se = sd(math, na.rm = TRUE) / sqrt(n())) |> 
+  ungroup()
+
+# plot the mean by school
+sch_means |> 
+  mutate(sch.id = factor(sch.id),
+         sch.id = reorder(sch.id, sch_mean)) |> 
+  ggplot(aes(x = sch_mean, y = sch.id)) +
+  geom_point(color = "#0aadff") +
+  # add se of mean as error bar
+  geom_errorbarh(
+    aes(xmin = sch_mean - 1.96*sch_mean_se,
+        xmax = sch_mean + 1.96*sch_mean_se)
+  ) +
+  # add sample mean
+  geom_vline(xintercept = mean(hsb$math, na.rm = TRUE),
+             color = "#0affa5", linewidth = 2)
+
+```
+
+Is there between-school variation in math scores?
+Fit an unconditional model where we fit an intercept and allow that intercept to vary by school
+Every school will get its own estimated mean
+The intercept will represent its overall mean and the random effect is the deviation from that overall mean
+
+An unconditional model just estimates a mean score for each school
+If we have no other variables in our model, the prediction for each student would equal the school mean
+```{r}
+# fit a basic model
+library(lme4)
+
+# unconditional model
+
+# outcome variable predicted by the intercept and the intercept variation by school
+m0 <- lmer(math ~ 1 + (1|sch.id), hsb) # 1 means intercept; paranthesis defines random effect
+summary(m0)
+```
+
+One fixed effect is the intercept
+On average, students scored 12.637 on their math assessment
+That average varied between school with a SD of 2.935
+
+```{r}
+# pull estimated means
+estimated_means <- coef(m0)$sch.id
+
+# merge it with the original dataset
+estimated_means <- estimated_means %>% 
+  mutate(sch.id = as.integer(rownames(.))) %>% 
+  rename(intercept = `(Intercept)`)
+
+left_join(sch_means, estimated_means) %>% 
+  mutate(sch.id = factor(sch.id),
+         sch.id = reorder(sch.id, sch_mean)) %>% 
+  ggplot(aes(sch_mean, sch.id)) +
+  geom_point(color = "#0aadff") +
+  geom_point(aes(x = intercept),
+             color = "#ff0ad6") +
+    geom_vline(xintercept = mean(hsb$math, na.rm = TRUE),
+             color = "#0affa5",
+             size = 2)
+```
+
+```{r}
+# estimate ICC
+library(performance)
+
+icc(m0)
+```
+
+Approximately 18% of the variability in math scores lies between schools
+
+# Data structuring and basic models
+```{r}
+library(here)
+library(tidyverse)
+
+curran <- read_csv(here("curran.csv"))
+```
+
+The data are a sample of 405 children.
+Four repeated measures of both the child's antisocial behavior and the child's reading recognition skills
+emotional support and cognitive stimulation provided by the mother were collected on the first measurement occasion
+
+reading scores as the outcome
+
+Make the data longer
+```{r}
+read <- curran %>% 
+  select(id, starts_with("read"))
+read %>% 
+  pivot_longer(
+    cols = read1:read4,
+    names_to = "timepoint",
+    values_to = "score"
+  )
+# alternative
+read %>% 
+  pivot_longer(-id,
+               names_to = "timepoint",
+               values_to = "score")
+
+```
+
+
+Change timepoint to 0, 1, 2, 3; 0 is the one where you want the intercept to be
+
+We want to fit a growth model. It means timepoints need to be numeric
+```{r}
+read %>% 
+  pivot_longer(-id,
+               names_to = "timepoint",
+               values_to = "score") %>% 
+  mutate(timepoint = parse_number(timepoint) - 1) 
+
+# OR transform during the pivot
+sub1 <- function(x) parse_number(x) - 1
+read %>% 
+  pivot_longer(-id,
+               names_to = "timepoint",
+               values_to = "score",
+               names_transform = list(
+                 timepoint = sub1)
+               )
+
+# create a long data object and transform it to wide format
+l <- read %>% 
+  pivot_longer(-id,
+               names_to = "timepoint",
+               values_to = "score",
+               names_transform = list(
+                 timepoint = sub1)
+               )
+
+l %>% 
+  pivot_wider(
+    names_from = timepoint,
+    values_from = score
+  )
+```
+
+```{r}
+d <- curran %>% 
+  pivot_longer(c(starts_with("read"), starts_with("anti")),
+               names_to = "variable",
+               values_to = "score") %>% 
+  mutate(timepoint = parse_number(variable) - 1,
+         variable = str_sub(variable, start = 1, end = 4)) %>%  # pull the first 4 characters
+  pivot_wider(
+    names_from = variable,
+    values_from = score
+  )
+
+d
+```
+
+Another example
+```{r}
+ls <- read_csv(here("ls19.csv"))
+```
+
+# Unconditional growth model
+
+Let's first fit a model with random intercepts
+Forcing everyone to grow at the same rate (fixed slope)
+```{r}
+library(lme4)
+m_intercepts <- lmer(read ~ 1 + timepoint + (1|id),
+                     data = d) # 1 is intercept, timepoint column which is a predictor; the parenthesis specifies random effect; intercept varies randomly across id 
+
+summary(m_intercepts)
+
+
+```
+
+In this model, each student gets their own intercept but the slope is constrained to be the same for every one
+We allow each student to have a different starting point, but constrain the rate of change to be constant
+How reasonable is this assumption?
+
+Yes, this is a reasonable assumption. A parsimonious model
+
+Model summary interpretation:
+
+Below Fixed effects:
+(Intercept) estimate = 2.70 is the value when the predictor(timepoint) is zero; Kids on average has a reading score of 2.7 when they started in the study
+timepoint estimate = 1.10; they grew on average about 1.1 on the reading recognition per timepoint (assume all students grew at 1.1; no student variation at the slope )
+
+Below Random effects:
+405 participants with 1325 observations
+id (Intercept) Std. Dev = 0.8830; the score of 2.70 varies between students with a sd of 0.883
+Residual std. Dev = 0.6789; our model prediction is off by a sd of 0.6789 (the distribution of the error has a sd of 0.6789)
+
+# Random slopes
+Let's fit a second model that allows each participant to have a different slope
+```{r}
+m_slopes <- lmer(read ~ 1 + timepoint + (1 + timepoint|id), data = d)
+m_slopes <- lmer(read ~ 1 + timepoint + (timepoint|id), data = d) # these two are the same; intercepts are generally implied
+# 1+timepoint are randomly varying across id; I want not only the intercept but also the timepoint to randomly vary across id
+
+summary(m_slopes)
+```
+
+You are not only estimating an additional variance component (variance of the intercept and variance of the slope), but also the covariance among them
+
+Model summary interpretation:
+Below Fixed effects:
+(Intercept) estimate = 2.696; students start with an average 2.696 on reading recognition score; it varies between students with a sd of 0.757 (from Random effects, id, intercept, Std. Dev)
+timepoint estimate = 1.119; students grew on average 1.119 per timepoint. That varies between students with a sd of 0.2731 (from Rnadom effects, timepoint, Std. Dev)
+
+Below Random effects:
+Corr 0.29; between intercept and slope; students who started higher had a higher growth 
+
+The lme4 package does not report p-values. Because it's not straightforward to calculate the denominator degress of freedom for an F test
+The methods that are used are approximations and, although generally accepted, are not guaranteed to be correct
+
+Interpret the confidence intervals or use the approximation that others use via {lmerTest} package
+
+```{r}
+# profiled confidence intervals
+confint(m_slopes) # takes a while 
+
+```
+
+It doesn't tell you the random effects. Need to match them up (look at the Random effects, Std. Dev. and Corr)
+
+The gold standard is to use bootstrap confidence intervals. But most of the time, profiles and bootstrap confidence intervals are very similar
+
+```{r}
+library(lmerTest)
+
+# refit model
+m_slopes2 <- lmer(read ~ timepoint + (timepoint|id), data = d)
+summary(m_slopes2)
+
+```
+
+Comparing models
+How do we know which model is preferred?
+- chi-square significance test of the change in the model deviance
+- information criteria like AIC, BIC
+- cross-validation procedures
+
+```{r}
+# using the built-in approach
+anova(m_intercepts, m_slopes)
+```
+
+When p value < .05, it means it's very unlikely the chi-square change is due to chance
+
+{performance} package has similar information but nicer output
+```{r}
+library(performance)
+compare_performance(m_intercepts, m_slopes) %>% 
+  print_md()
+
+# or use Bayes factors; This is the default if the models are nested
+test_performance(m_intercepts, m_slopes) %>% 
+  print_md()
+
+```
+
+Bayes factors test under which model the observed data are more likely
+
+# Predictions Model Visualizations
+```{r}
+
+```
+
